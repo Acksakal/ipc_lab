@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>minishell step debugger</title>
+<style>
+:root{color-scheme:dark;--bg:#171c26;--pn:#1f2636;--ln:#313b52;--tx:#e4e8f0;--mu:#9aa5ba;--sh:#f0b84a;--ch:#52c4dc;--bad:#ef7470;--ok:#7fd68e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,sans-serif}
+header{padding:14px 20px;border-bottom:1px solid var(--ln)}
+h1{font-size:18px;margin:0 0 2px}header p{margin:0;color:var(--mu);font-size:13px}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:16px;padding:16px 20px}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.pn{background:var(--pn);border:1px solid var(--ln);border-radius:6px;padding:12px}
+h2{font-size:13px;margin:0 0 8px;color:var(--mu);font-weight:600}
+pre{margin:0;font:13px/1.55 ui-monospace,Consolas,monospace;overflow-x:auto}
+.ln{display:flex;white-space:pre;padding:0 4px;border-radius:3px}.ln.on{background:#2b3550}
+.gut{width:34px;flex:none;display:flex;gap:3px;align-items:center}
+.dot{width:9px;height:9px;border-radius:50%}.dot.sh{background:var(--sh)}.dot.ch{background:var(--ch)}
+.ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+button,select{background:#2a3450;color:var(--tx);border:1px solid var(--ln);border-radius:5px;padding:6px 12px;font:inherit;cursor:pointer}
+button:hover{background:#34416a}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--ch);outline-offset:2px}
+label{font-size:13px;color:var(--mu)}
+#note{font-size:15px;min-height:4.5em}#std{margin-top:8px;padding:8px 10px;border-left:3px solid var(--ch);background:#1a2232;font-size:13px;color:#cdd5e4}
+#std b{color:var(--ch)}
+#cards{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}@media(max-width:600px){#cards{grid-template-columns:1fr}}
+.card{border:2px solid var(--ln);border-radius:6px;padding:9px;background:#1a2132;font-size:13px;transition:opacity .4s,filter .4s,transform .4s}
+.card.sh{border-color:var(--sh)}.card.ch{border-color:var(--ch)}
+.card.zombie{filter:grayscale(1);opacity:.65}.card.born{animation:born .7s ease-out}.card.gone{display:none}
+@keyframes born{from{transform:translateX(-40px) scale(.9);opacity:0}to{transform:none;opacity:1}}
+.card h3{margin:0 0 6px;font-size:14px}.k{color:var(--mu)}
+.img{display:inline-block;padding:1px 8px;border-radius:4px;background:#2c3858;font:13px ui-monospace,Consolas,monospace}
+.img.swap{animation:swap .9s ease-out}@keyframes swap{0%{transform:rotateX(90deg);background:var(--bad)}100%{transform:none}}
+.st{float:right;font-size:12px;padding:0 7px;border-radius:9px;background:#2c3858}.st.blocked{background:#5b4a1d}.st.zombie{background:#555}
+.buf{font:12px ui-monospace,Consolas,monospace;background:#11151d;padding:2px 6px;border-radius:3px;min-height:1.5em;white-space:pre-wrap}
+#tty{background:#0e1219;border:1px solid var(--ln);border-radius:5px;padding:8px;min-height:6.5em;font:13px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap}
+#fd{font-size:12px;color:var(--mu);text-align:center}
+details{margin:0 20px 20px}summary{cursor:pointer;color:var(--mu);font-size:14px}dt{color:var(--ch);margin-top:8px;font-weight:600}dd{margin:0 0 0 12px;font-size:14px}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style></head><body>
+<header><h1>minishell step debugger</h1>
+<p>Step through <code>fork</code>, <code>exec</code> and <code>wait</code>. A simulation of the real code, explained with POSIX and C90 rules. Keys: ← → step, Space plays.</p></header>
+<main>
+<section class="pn"><h2>minishell.c (key parts) &nbsp;<span class="dot sh" style="display:inline-block"></span> parent &nbsp;<span class="dot ch" style="display:inline-block"></span> child</h2><pre id="code"></pre></section>
+<section>
+<div class="pn"><div class="ctl">
+<label>Command <select id="sc"></select></label>
+<label>After fork, runs first <select id="first"><option value="p">parent</option><option value="c">child</option></select></label></div>
+<div class="ctl"><button id="back">Back</button><button id="next">Step</button><button id="play">Play</button><button id="reset">Reset</button><span id="cnt" class="k"></span></div>
+<div id="note"></div><div id="std"></div></div>
+<div id="cards"></div><div id="fd">fd 0, 1, 2 are one shared open terminal: fork copies the process, not the terminal.</div>
+<div class="pn" style="margin-top:10px"><h2>Terminal</h2><div id="tty"></div></div>
+</section></main>
+<details><summary>Glossary (POSIX.1-2017 and ISO C90), paraphrased</summary><dl id="gl"></dl></details>
+<script>
+var CODE=["for (;;) {","    reap_background_jobs();","    print_prompt();   /* printf + fflush */","    if (!read_line(line, sizeof line)) break;","    argc = parse_line(line, argv, &background);","    action = try_builtin(argv);","    launch_command(argv, background);","}","",
+"static void launch_command(char *argv[], int background) {","    fflush(stdout);","    id = fork();","    if (id < 0) { perror(\"fork\"); }","    else if (id == 0) { run_child(argv); }","    else if (background) { printf(\"[started pid %d]\\n\", (int)id); }","    else { wait_for_foreground(id); }","}","",
+"static void run_child(char *argv[]) {","    execvp(argv[0], argv);","    perror(argv[0]);","    _exit(EXIT_CMD_NOT_RUN);   /* scenario 4 removes this */","}","",
+"static void wait_for_foreground(pid_t id) {","    waitpid(id, &status, 0);","    report_status(status);","}","",
+"static void reap_background_jobs(void) {","    pid = waitpid(-1, &status, WNOHANG);","    printf(\"[done pid %d]\\n\", (int)pid);","}"];
+var G={proc:["Process, thread, image","POSIX: a process is an address space with one or more threads running in it, plus the system resources they need. A thread is one flow of control. The 1974 paper’s “image” is this address space and state, back when every process had one thread."],
+fork:["fork","POSIX: fork creates a new process that is a copy of the caller, with its own unique pid, created with a single thread (the caller). It returns 0 in the child, the child’s pid in the parent, -1 on failure. If the parent has several threads, the child should only call async-signal-safe functions until it execs."],
+exec:["exec","POSIX: exec replaces the current process image with a new one built from a file. A successful exec never returns. Open file descriptors stay open unless FD_CLOEXEC is set; open directory streams are closed; signals with handlers reset to default. The pid does not change."],
+fd:["File descriptors","After fork both processes hold the same open terminal. exec keeps descriptors open (unless FD_CLOEXEC), which is why a program started by the shell can print to your terminal, and why redirection works."],
+wait:["wait and waitpid","POSIX: the parent calls waitpid to block until a child terminates and to read its status. WNOHANG returns at once if nobody has finished."],
+zombie:["Zombie","POSIX: a terminated process becomes a zombie, an inactive process that remains until its parent collects its status with wait or waitpid. Only then does it disappear. If the parent exits first, its children are adopted by an implementation-defined system process."],
+exit:["_exit versus exit","POSIX: _exit ends the process without running atexit handlers; exit additionally flushes and closes all open streams. In a child after a failed exec, _exit avoids flushing stdio buffers copied from the parent."],
+buf:["stdio buffering (C90)","ISO C: stdout is fully buffered unless it is an interactive device, stderr is never fully buffered, and fflush forces buffered text out. The buffer lives in process memory, so fork copies it and exec destroys it. Also: fork, exec and wait are POSIX, not C90; gnu90 exposes them, while strict -std=c90 typically needs _POSIX_C_SOURCE defined."]};
+var PRE={};
+function clone(o){return JSON.parse(JSON.stringify(o))}
+function S(w,l,t,c,f){return{w:w,l:l,t:t,c:c,f:f}}
+function init(){return{p:{sh:{pid:100,img:"minishell",role:"parent shell",st:"running",line:null,v:"",buf:""}},tty:"",fresh:"",exec:""}}
+function words(c){return c.replace(/\s*&$/,"")}
+function pre(cmd,bg){return[
+S("sh",1,"Every loop begins by reaping finished background children. None yet.","zombie"),
+S("sh",2,"print_prompt: printf puts “mini$ ” in the stdout buffer, then fflush pushes it out. Without fflush it would stay buffered, because the text has no newline.","buf",function(s){s.tty+="mini$ "}),
+S("sh",3,"read_line blocks until you press Enter. You type: "+cmd,"proc",function(s){s.tty+=cmd+"\n"}),
+S("sh",4,"parse_line splits the text into argv and ends it with NULL, which exec requires."+(bg?" The trailing & is removed and background becomes 1.":""),"exec",function(s){s.p.sh.v="argv="+JSON.stringify(words(cmd).split(" "))+" background="+(bg?1:0)}),
+S("sh",5,"try_builtin: not cd, exit or status, so an external program has to run.","proc"),
+S("sh",10,"fflush(stdout) empties the buffer before forking. fork copies buffered text too, so an empty buffer cannot be printed twice.","buf"),
+S("sh",11,"fork(): the kernel creates a second process, a copy of this one with a new pid (101) and one thread. fork returns twice: 101 in the parent, 0 in the child.","fork",function(s){var c=clone(s.p.sh);c.pid=101;c.role="child";c.line=11;c.v+=" id=0";s.p.ch=c;s.p.sh.v+=" id=101";s.fresh="ch"})]}
+function ord(f,a,c,b){return f=="p"?a.concat(c,b):c.concat(a,b)}
+function childExec(prog,ok){return ok?[S("ch",13,"In the child id is 0, so this branch runs. Same code as the parent, different value of id.","fork"),
+S("ch",19,"execvp succeeds: the process image is replaced by "+prog+". Same process, same pid, same single thread, but new code and memory. Nothing after this line will ever run.","exec",function(s){s.p.ch.img=prog;s.p.ch.v="";s.p.ch.buf="";s.exec="ch"})]:
+[S("ch",13,"In the child id is 0, so this branch runs.","fork"),
+S("ch",19,"execvp fails: no such program. It returns -1, and the process image is untouched: this is still minishell code.","exec"),
+S("ch",20,"perror writes to stderr, which is unbuffered, so the message appears at once.","buf",function(s){s.tty+="nosuchcmd: No such file or directory\n"})]}
+function die(w,txt){return S(w,null,txt,"zombie",function(s){s.p[w].st="zombie";s.p[w].line=null})}
+var SC={
+"echo hi":function(f){var cmd="echo hi",C=childExec("echo",1).concat([S("ch",null,"echo writes hi to fd 1. Descriptors survive exec, and fd 1 is the shared terminal.","fd",function(s){s.tty+="hi\n"}),die("ch","echo finishes. The process ends but its exit status is kept: it is a zombie until the parent collects it.")]);
+var Pa=f=="p"?[S("sh",15,"In the parent id is 101 and background is 0, so it takes the last branch.","fork"),S("sh",25,"waitpid(101) blocks: the parent sleeps until the child finishes.","wait",function(s){s.p.sh.st="blocked"})]:[S("sh",15,"Parent branch: id is 101, background is 0.","fork"),S("sh",25,"waitpid finds the child already a zombie, so it returns immediately.","wait",function(s){delete s.p.ch})];
+var Pb=(f=="p"?[S("sh",25,"waitpid returns: the status is collected and the zombie is gone for good.","zombie",function(s){s.p.sh.st="running";delete s.p.ch})]:[]).concat([S("sh",26,"report_status: exited with 0, nothing to print. Back to the prompt.","wait")]);
+return pre(cmd,0).concat(ord(f,Pa,C,Pb))},
+"sleep 1 &":function(f){var cmd="sleep 1 &",C=childExec("sleep",1).concat([die("ch","One second later sleep ends. The child is a zombie now; nobody has called wait for it.")]);
+var Pa=[S("sh",14,"background is 1: the parent does not wait. It just reports the pid and moves on.","wait",function(s){s.tty+="[started pid 101]\n"})];
+var Pb=[S("sh",1,"Next loop: reap_background_jobs calls waitpid(-1, WNOHANG). It finds the zombie child.","zombie",function(s){delete s.p.ch}),S("sh",31,"The zombie is collected and removed, and the shell prints that the job is done.","zombie",function(s){s.tty+="[done pid 101]\n"})];
+return pre(cmd,1).concat(ord(f,Pa,C,Pb))},
+"nosuchcmd":function(f){var cmd="nosuchcmd",C=childExec("",0).concat([S("ch",21,"_exit(127): the child dies at once instead of falling back into the shell loop. 127 means “could not run”.","exit"),die("ch","Zombie with status 127, waiting to be collected.")]);
+var Pa=f=="p"?[S("sh",15,"Parent branch: foreground command, so it waits.","fork"),S("sh",25,"waitpid blocks until the child finishes.","wait",function(s){s.p.sh.st="blocked"})]:[S("sh",15,"Parent branch: foreground command, so it waits.","fork"),S("sh",25,"waitpid finds the zombie child at once and collects its status.","wait",function(s){delete s.p.ch})];
+var Pb=(f=="p"?[S("sh",25,"waitpid returns and collects the status.","zombie",function(s){s.p.sh.st="running";delete s.p.ch})]:[]).concat([S("sh",26,"report_status sees exit status 127 and prints it.","wait",function(s){s.tty+="[exit status 127]\n"})]);
+return pre(cmd,0).concat(ord(f,Pa,C,Pb))},
+"nosuchcmd (no _exit bug)":function(f){var cmd="nosuchcmd",C=childExec("",0).concat([
+S("ch",22,"Without _exit, run_child simply returns into launch_command, which returns into main’s loop.","exit"),
+S("ch",1,"The child is now running the shell loop: a second shell, same code, same terminal.","proc",function(s){s.p.ch.role="child, now a 2nd shell"}),
+S("ch",2,"It prints its own prompt. Meanwhile the parent still sits in waitpid, waiting for a child that will never finish by itself.","wait",function(s){s.tty+="mini$ "}),
+S("ch",3,"You press Ctrl+D (1st time). Only one process reads the terminal at a time, and it is the child, so it receives the end-of-file.","fd",function(s){s.p.ch.line=3}),
+die("ch","The child’s loop breaks and it exits. It is a zombie now."),
+S("sh",25,"Its child died, so the parent’s waitpid finally returns.","wait",function(s){s.p.sh.st="running";delete s.p.ch}),
+S("sh",3,"The parent prints its prompt and reads. Ctrl+D (2nd time) reaches the parent, which exits. This matches the two Ctrl+D presses you saw.","fd",function(s){s.tty+="mini$ \n";s.p.sh.st="exited"})]);
+var Pa=[S("sh",15,"Parent branch: foreground command, so it waits.","fork"),S("sh",25,"waitpid blocks, waiting for the child.","wait",function(s){s.p.sh.st="blocked"})];
+return pre(cmd,0).concat(Pa,C)}};
+var steps,snaps,i=0,timer=null,ST;
+function build(){var k=document.getElementById("sc").value,f=document.getElementById("first").value;steps=SC[k](f);snaps=[init()];
+for(var n=0;n<steps.length;n++){var s=clone(snaps[n]);s.fresh="";s.exec="";var st=steps[n];if(st.f)st.f(s);var pr=s.p[st.w];if(pr)pr.line=st.l;snaps.push(s)}
+i=0;stop();render()}
+function render(){var s=snaps[i],st=steps[i-1],act=st&&st.l!=null?st.l:-1,h="";
+for(var n=0;n<CODE.length;n++){var d="";["sh","ch"].forEach(function(k){var p=s.p[k];if(p&&p.line===n&&p.st!="zombie"&&p.st!="exited")d+='<span class="dot '+k+'"></span>'});
+h+='<div class="ln'+(d?" on":"")+'"><span class="gut">'+d+"</span>"+CODE[n].replace(/&/g,"&amp;").replace(/</g,"&lt;")+"</div>"}
+document.getElementById("code").innerHTML=h;
+document.getElementById("note").textContent=st?st.t:"Pick a command and press Step. Each press runs one line in one process.";
+var g=st&&G[st.c];document.getElementById("std").innerHTML=g?"<b>"+g[0]+".</b> "+g[1]:"";document.getElementById("std").style.display=g?"block":"none";
+var c="";["sh","ch"].forEach(function(k){var p=s.p[k];if(!p)return;
+c+='<div class="card '+k+(p.st=="zombie"?" zombie":"")+(s.fresh==k?" born":"")+'"><span class="st '+p.st+'">'+p.st+"</span><h3>pid "+p.pid+" · "+p.role+'</h3><div><span class="k">image </span><span class="img'+(s.exec==k?" swap":"")+'">'+(p.img||"minishell")+'</span></div><div><span class="k">threads </span>1 <span class="k">· line </span>'+(p.line==null?"–":p.line+1)+'</div><div class="k">variables</div><div class="buf">'+(p.v||" ")+"</div></div>"});
+document.getElementById("cards").innerHTML=c||"";
+document.getElementById("tty").textContent=s.tty;document.getElementById("cnt").textContent="step "+i+" / "+steps.length}
+function go(d){i=Math.max(0,Math.min(steps.length,i+d));render();if(i==steps.length)stop()}
+function stop(){clearInterval(timer);timer=null;document.getElementById("play").textContent="Play"}
+function play(){if(timer){stop();return}if(i==steps.length)i=0;document.getElementById("play").textContent="Pause";timer=setInterval(function(){go(1)},2200)}
+var sel=document.getElementById("sc");Object.keys(SC).forEach(function(k){var o=document.createElement("option");o.textContent=k;sel.appendChild(o)});
+sel.onchange=build;document.getElementById("first").onchange=build;
+document.getElementById("next").onclick=function(){go(1)};document.getElementById("back").onclick=function(){go(-1)};
+document.getElementById("play").onclick=play;document.getElementById("reset").onclick=build;
+document.addEventListener("keydown",function(e){if(e.target.tagName=="SELECT")return;if(e.key=="ArrowRight")go(1);else if(e.key=="ArrowLeft")go(-1);else if(e.key==" "){e.preventDefault();play()}});
+var gl="";for(var k in G)gl+="<dt>"+G[k][0]+"</dt><dd>"+G[k][1]+"</dd>";document.getElementById("gl").innerHTML=gl;
+build();
+</script></body></html>
